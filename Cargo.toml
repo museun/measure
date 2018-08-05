@@ -1,0 +1,18 @@
+[package]
+name = "measure"
+version = "0.1.0"
+authors = ["museun@outlook.com"]
+
+[dependencies]
+winapi = { version = "0.3.5", features = [ "winnt",
+ "processthreadsapi",
+ "errhandlingapi",
+ "timezoneapi",
+ "minwinbase",
+ "processenv",
+ "shellapi",
+ "winbase",
+ "jobapi2",
+ "handleapi",
+ "synchapi",
+] }
