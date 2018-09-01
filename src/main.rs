@@ -82,12 +82,12 @@ fn main() {
     unsafe { processthreadsapi::GetExitCodeProcess(pi.hProcess, &mut exit_code) };
     unsafe { handleapi::CloseHandle(pi.hProcess) };
 
-    println!(
+    eprintln!(
         "\npeak\t{:.2}MiB",
         (limit.PeakProcessMemoryUsed as f64) / 1e6
     );
 
-    println!("{}", times);
+    eprintln!("{}", times);
 }
 
 fn get_last_error() -> (u32, String) {
