@@ -8,7 +8,7 @@ use std::{
 };
 
 use winapi::{
-    shared::minwindef::{LPVOID, TRUE},
+    shared::minwindef::{FILETIME, LPVOID, TRUE},
     um::{
         handleapi::CloseHandle,
         jobapi2::{AssignProcessToJobObject, CreateJobObjectW, QueryInformationJobObject},
@@ -80,7 +80,7 @@ impl ProcessInfo {
         let res = QueryInformationJobObject(
             job,
             JobObjectExtendedLimitInformation,
-            &mut limit as *mut _ as LPVOID,
+            &mut limit as *mut _ as _,
             size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
             null_mut(),
         );
@@ -113,11 +113,12 @@ impl ProcessInfo {
         if GetCurrentProcess() == handle {
             killed = created
         }
+
         trait AsFractionalTime {
             fn as_fractional_time(&self) -> f64;
         }
 
-        impl AsFractionalTime for winapi::shared::minwindef::FILETIME {
+        impl AsFractionalTime for FILETIME {
             fn as_fractional_time(&self) -> f64 {
                 let low = self.dwLowDateTime as usize;
                 let high = self.dwHighDateTime as usize;
