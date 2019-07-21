@@ -1,87 +1,144 @@
-extern crate winapi;
+use std::{
+    ffi::OsString,
+    io::Error,
+    mem::{size_of, zeroed},
+    os::windows::prelude::*,
+    process::exit,
+    ptr::null_mut,
+};
 
-use winapi::shared::{minwindef, ntdef};
-use winapi::um::{errhandlingapi, handleapi, jobapi2, processthreadsapi, synchapi, winbase, winnt};
+use winapi::{
+    shared::minwindef::{LPVOID, TRUE},
+    um::{
+        handleapi::CloseHandle,
+        jobapi2::{AssignProcessToJobObject, CreateJobObjectW, QueryInformationJobObject},
+        processthreadsapi::{
+            CreateProcessW, GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, ResumeThread,
+            PROCESS_INFORMATION, STARTUPINFOW,
+        },
+        synchapi::WaitForSingleObject,
+        winbase::{CREATE_SUSPENDED, INFINITE},
+        winnt::{JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION},
+    },
+};
 
-use std::ffi::OsString;
-use std::os::windows::prelude::*;
-use std::{env, fmt, mem, ptr};
+struct ProcessInfo {
+    info: PROCESS_INFORMATION,
+}
 
-fn main() {
-    let args = env::args_os().skip(1).collect::<Vec<_>>();
-    let mut command = OsString::with_capacity(args.iter().map(|i| i.len()).sum());
-    for s in &args {
-        command.push(s);
-        command.push(" ");
-    }
-    command.push("\0");
-    let wstr = command.as_os_str().encode_wide().collect::<Vec<_>>();
+impl ProcessInfo {
+    unsafe fn create(command: OsString) -> Self {
+        let wstr: Vec<u16> = command.as_os_str().encode_wide().collect();
 
-    let mut si: processthreadsapi::STARTUPINFOW = unsafe { mem::zeroed() };
-    si.cb = mem::size_of::<processthreadsapi::STARTUPINFOW>() as u32;
-    let mut pi: processthreadsapi::PROCESS_INFORMATION = unsafe { mem::zeroed() };
+        let mut si = zeroed::<STARTUPINFOW>();
+        si.cb = size_of::<STARTUPINFOW>() as u32;
 
-    let res = unsafe {
-        processthreadsapi::CreateProcessW(
-            ptr::null_mut(),
+        let mut pi = zeroed();
+        let res = CreateProcessW(
+            null_mut(),
             wstr.as_ptr() as *mut _,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            minwindef::TRUE,
-            winbase::CREATE_SUSPENDED,
-            ptr::null_mut(),
-            ptr::null_mut(),
+            null_mut(),
+            null_mut(),
+            TRUE,
+            CREATE_SUSPENDED,
+            null_mut(),
+            null_mut(),
             &mut si,
             &mut pi,
-        )
-    };
-    if res != minwindef::TRUE {
-        let err = std::io::Error::last_os_error();
-        eprintln!("failed to spawn subprocess, error: {}", err);
-        eprintln!(
-            "you may need to use \"cmd /c {}\"",
-            command.into_string().unwrap()
         );
-        ::std::process::exit(1)
+
+        if res != TRUE {
+            eprintln!(
+                "failed to spawn subprocess, error: {}",
+                Error::last_os_error()
+            );
+            eprintln!(
+                "you may need to use \"cmd /c {}\"",
+                command.into_string().unwrap()
+            );
+            exit(1);
+        }
+
+        Self { info: pi }
     }
 
-    let job = unsafe { jobapi2::CreateJobObjectW(ptr::null_mut(), ptr::null_mut()) };
-    if unsafe { jobapi2::AssignProcessToJobObject(job, pi.hProcess) } != minwindef::TRUE {
-        let err = std::io::Error::last_os_error();
-        eprintln!("failed to AssignProcessToJobObject, error: {}", err);
-    }
+    unsafe fn spawn(&self) -> JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+        let job = CreateJobObjectW(null_mut(), null_mut());
+        if AssignProcessToJobObject(job, self.info.hProcess) != TRUE {
+            eprintln!(
+                "failed to AssignProcessToJobObject, error: {}",
+                Error::last_os_error()
+            );
+            // not a fatal error
+        }
 
-    unsafe { processthreadsapi::ResumeThread(pi.hThread) };
-    unsafe { handleapi::CloseHandle(pi.hThread) };
+        ResumeThread(self.info.hThread);
+        CloseHandle(self.info.hThread);
 
-    unsafe { synchapi::WaitForSingleObject(pi.hProcess, winbase::INFINITE) };
-    let mut limit: winnt::JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { mem::zeroed() };
-    let res = unsafe {
-        jobapi2::QueryInformationJobObject(
+        WaitForSingleObject(self.info.hProcess, INFINITE);
+        let mut limit: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
+        let res = QueryInformationJobObject(
             job,
-            winnt::JobObjectExtendedLimitInformation,
-            &mut limit as *mut _ as minwindef::LPVOID,
-            mem::size_of::<winnt::JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            ptr::null_mut(),
-        )
-    };
-    if res != minwindef::TRUE {
-        let err = std::io::Error::last_os_error();
-        eprintln!("failed to QueryInformationJobObject, error: {}", err);
+            JobObjectExtendedLimitInformation,
+            &mut limit as *mut _ as LPVOID,
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            null_mut(),
+        );
+
+        if res != TRUE {
+            eprintln!(
+                "failed to QueryInformationJobObject, error: {}",
+                Error::last_os_error()
+            );
+            // not a fatal error
+        }
+
+        CloseHandle(job);
+
+        limit
     }
-    unsafe { handleapi::CloseHandle(job) };
 
-    let times = Times::new(pi.hProcess);
-    let mut exit_code = 0;
-    unsafe { processthreadsapi::GetExitCodeProcess(pi.hProcess, &mut exit_code) };
-    unsafe { handleapi::CloseHandle(pi.hProcess) };
+    unsafe fn get_times(&self) -> Times {
+        let handle = self.info.hProcess;
 
-    eprintln!(
-        "\npeak\t{:.2}MiB",
-        (limit.PeakProcessMemoryUsed as f64) / 1e6
-    );
+        let mut created = zeroed();
+        let mut killed = zeroed();
+        let mut sys = zeroed();
+        let mut user = zeroed();
 
-    eprintln!("{}", times);
+        if GetProcessTimes(handle, &mut created, &mut killed, &mut sys, &mut user) != TRUE {
+            eprintln!("failed to get process times: {}", Error::last_os_error());
+        }
+
+        if GetCurrentProcess() == handle {
+            killed = created
+        }
+        trait AsFractionalTime {
+            fn as_fractional_time(&self) -> f64;
+        }
+
+        impl AsFractionalTime for winapi::shared::minwindef::FILETIME {
+            fn as_fractional_time(&self) -> f64 {
+                let low = self.dwLowDateTime as usize;
+                let high = self.dwHighDateTime as usize;
+                let time = (low | (high << 32)) as f64;
+                time * 0.000_000_1
+            }
+        }
+
+        Times {
+            real: killed.as_fractional_time() - created.as_fractional_time(),
+            user: user.as_fractional_time(),
+            sys: sys.as_fractional_time(),
+        }
+    }
+
+    unsafe fn close(self) -> i32 {
+        let mut exit_code = 0;
+        GetExitCodeProcess(self.info.hProcess, &mut exit_code);
+        CloseHandle(self.info.hProcess);
+        exit_code as _
+    }
 }
 
 struct Times {
@@ -90,42 +147,35 @@ struct Times {
     sys: f64,
 }
 
-impl Times {
-    fn new(hn: winnt::HANDLE) -> Self {
-        use winapi::shared::minwindef::FILETIME;
-        let (mut created, mut killed, mut sys, mut user) =
-            unsafe { (mem::zeroed(), mem::zeroed(), mem::zeroed(), mem::zeroed()) };
-
-        let res = unsafe {
-            processthreadsapi::GetProcessTimes(hn, &mut created, &mut killed, &mut sys, &mut user)
-        };
-        if res != minwindef::TRUE {
-            let err = std::io::Error::last_os_error();
-            eprintln!("failed to get process times, error: {}", err);
-            ::std::process::exit(1)
-        }
-        if hn == unsafe { processthreadsapi::GetCurrentProcess() } {
-            killed = created
-        }
-
-        let convert = |ft: &FILETIME| {
-            let f = (ft.dwLowDateTime as usize) | ((ft.dwHighDateTime as usize) << 32);
-            (f as f64) * 0.000_000_1
-        };
-
-        let real = convert(&killed) - convert(&created);
-        Self {
-            real,
-            user: convert(&user),
-            sys: convert(&sys),
-        }
-    }
-}
-
-impl fmt::Display for Times {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl std::fmt::Display for Times {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "real\t{:.3}s", self.real)?;
         writeln!(f, "user\t{:.3}s", self.user)?;
         writeln!(f, "sys\t{:.3}s", self.sys)
+    }
+}
+
+fn main() {
+    let mut command = std::env::args_os()
+        .skip(1)
+        .fold(OsString::with_capacity(256), |mut s, a| {
+            if !s.is_empty() {
+                s.push(" ");
+            }
+            s.push(a);
+            s
+        });
+    command.push("\0");
+
+    unsafe {
+        let pi = ProcessInfo::create(command);
+        let limit = pi.spawn();
+        let times = pi.get_times();
+        eprintln!(
+            "\npeak\t{:.2}MiB",
+            (limit.PeakProcessMemoryUsed as f64) / 1e6
+        );
+        eprintln!("{}", times);
+        exit(pi.close())
     }
 }
