@@ -36,8 +36,8 @@ fn main() {
         )
     };
     if res != minwindef::TRUE {
-        let (err, msg) = get_last_error();
-        eprintln!("failed to spawn subprocess, error: ({}) {}", err, msg);
+        let err = std::io::Error::last_os_error();
+        eprintln!("failed to spawn subprocess, error: {}", err);
         eprintln!(
             "you may need to use \"cmd /c {}\"",
             command.into_string().unwrap()
@@ -47,11 +47,8 @@ fn main() {
 
     let job = unsafe { jobapi2::CreateJobObjectW(ptr::null_mut(), ptr::null_mut()) };
     if unsafe { jobapi2::AssignProcessToJobObject(job, pi.hProcess) } != minwindef::TRUE {
-        let (err, msg) = get_last_error();
-        eprintln!(
-            "failed to AssignProcessToJobObject, error: ({}) {}",
-            err, msg
-        );
+        let err = std::io::Error::last_os_error();
+        eprintln!("failed to AssignProcessToJobObject, error: {}", err);
     }
 
     unsafe { processthreadsapi::ResumeThread(pi.hThread) };
@@ -69,11 +66,8 @@ fn main() {
         )
     };
     if res != minwindef::TRUE {
-        let (err, msg) = get_last_error();
-        eprintln!(
-            "failed to QueryInformationJobObject, error: ({}) {}",
-            err, msg
-        );
+        let err = std::io::Error::last_os_error();
+        eprintln!("failed to QueryInformationJobObject, error: {}", err);
     }
     unsafe { handleapi::CloseHandle(job) };
 
@@ -88,24 +82,6 @@ fn main() {
     );
 
     eprintln!("{}", times);
-}
-
-fn get_last_error() -> (u32, String) {
-    let err = unsafe { errhandlingapi::GetLastError() };
-    let mut msg = vec![0u16; 127]; // fixed length strings in the windows api
-    unsafe {
-        winbase::FormatMessageW(
-            winbase::FORMAT_MESSAGE_FROM_SYSTEM | winbase::FORMAT_MESSAGE_IGNORE_INSERTS,
-            ptr::null_mut(),
-            err,
-            u32::from(ntdef::LANG_SYSTEM_DEFAULT),
-            msg.as_mut_ptr(),
-            msg.len() as u32,
-            ptr::null_mut(),
-        );
-    }
-    let s = String::from_utf16_lossy(&msg);
-    (err, s)
 }
 
 struct Times {
@@ -124,8 +100,8 @@ impl Times {
             processthreadsapi::GetProcessTimes(hn, &mut created, &mut killed, &mut sys, &mut user)
         };
         if res != minwindef::TRUE {
-            let (err, msg) = get_last_error();
-            eprintln!("failed to get process times, error: ({}) {}", err, msg);
+            let err = std::io::Error::last_os_error();
+            eprintln!("failed to get process times, error: {}", err);
             ::std::process::exit(1)
         }
         if hn == unsafe { processthreadsapi::GetCurrentProcess() } {
