@@ -1,14 +1,14 @@
 use std::{
     ffi::OsString,
     io::Error,
-    mem::{size_of, zeroed},
+    mem::{size_of, MaybeUninit},
     os::windows::prelude::*,
     process::exit,
     ptr::null_mut,
 };
 
 use winapi::{
-    shared::minwindef::{FILETIME, LPVOID, TRUE},
+    shared::minwindef::{FILETIME, TRUE},
     um::{
         handleapi::CloseHandle,
         jobapi2::{AssignProcessToJobObject, CreateJobObjectW, QueryInformationJobObject},
@@ -30,10 +30,11 @@ impl ProcessInfo {
     unsafe fn create(command: OsString) -> Self {
         let wstr: Vec<u16> = command.as_os_str().encode_wide().collect();
 
-        let mut si = zeroed::<STARTUPINFOW>();
+        // 'cb' has to be set
+        let mut si = MaybeUninit::<STARTUPINFOW>::zeroed().assume_init();
         si.cb = size_of::<STARTUPINFOW>() as u32;
 
-        let mut pi = zeroed();
+        let mut pi = MaybeUninit::uninit();
         let res = CreateProcessW(
             null_mut(),
             wstr.as_ptr() as *mut _,
@@ -44,7 +45,7 @@ impl ProcessInfo {
             null_mut(),
             null_mut(),
             &mut si,
-            &mut pi,
+            pi.as_mut_ptr(),
         );
 
         if res != TRUE {
@@ -59,7 +60,9 @@ impl ProcessInfo {
             exit(1);
         }
 
-        Self { info: pi }
+        Self {
+            info: pi.assume_init(),
+        }
     }
 
     unsafe fn spawn(&self) -> JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
@@ -76,15 +79,14 @@ impl ProcessInfo {
         CloseHandle(self.info.hThread);
 
         WaitForSingleObject(self.info.hProcess, INFINITE);
-        let mut limit: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
+        let mut limit = MaybeUninit::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>::uninit();
         let res = QueryInformationJobObject(
             job,
             JobObjectExtendedLimitInformation,
-            &mut limit as *mut _ as _,
+            limit.as_mut_ptr() as *mut _,
             size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
             null_mut(),
         );
-
         if res != TRUE {
             eprintln!(
                 "failed to QueryInformationJobObject, error: {}",
@@ -92,22 +94,29 @@ impl ProcessInfo {
             );
             // not a fatal error
         }
-
         CloseHandle(job);
 
-        limit
+        limit.assume_init()
     }
 
-    unsafe fn get_times(&self) -> Times {
+    unsafe fn get_times(&self) -> Option<Times> {
         let handle = self.info.hProcess;
 
-        let mut created = zeroed();
-        let mut killed = zeroed();
-        let mut sys = zeroed();
-        let mut user = zeroed();
+        let mut created = MaybeUninit::uninit();
+        let mut killed = MaybeUninit::uninit();
+        let mut sys = MaybeUninit::uninit();
+        let mut user = MaybeUninit::uninit();
 
-        if GetProcessTimes(handle, &mut created, &mut killed, &mut sys, &mut user) != TRUE {
+        if GetProcessTimes(
+            handle,
+            created.as_mut_ptr(),
+            killed.as_mut_ptr(),
+            sys.as_mut_ptr(),
+            user.as_mut_ptr(),
+        ) != TRUE
+        {
             eprintln!("failed to get process times: {}", Error::last_os_error());
+            return None;
         }
 
         if GetCurrentProcess() == handle {
@@ -127,11 +136,12 @@ impl ProcessInfo {
             }
         }
 
-        Times {
-            real: killed.as_fractional_time() - created.as_fractional_time(),
-            user: user.as_fractional_time(),
-            sys: sys.as_fractional_time(),
-        }
+        Some(Times {
+            real: killed.assume_init().as_fractional_time()
+                - created.assume_init().as_fractional_time(),
+            user: user.assume_init().as_fractional_time(),
+            sys: sys.assume_init().as_fractional_time(),
+        })
     }
 
     unsafe fn close(self) -> i32 {
@@ -176,7 +186,9 @@ fn main() {
             "\npeak\t{:.2}MiB",
             (limit.PeakProcessMemoryUsed as f64) / 1e6
         );
-        eprintln!("{}", times);
+        if let Some(times) = times {
+            eprintln!("{}", times);
+        }
         exit(pi.close())
     }
 }
