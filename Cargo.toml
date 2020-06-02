@@ -3,9 +3,10 @@ name = "measure"
 version = "0.2.1"
 authors = ["museun@outlook.com"]
 edition = "2018"
+license = "0BSD"
 
 [dependencies.winapi]
-version =  "0.3.7"
+version = "0.3.8"
 features = [ 
     "winnt",
     "processthreadsapi",
@@ -15,3 +16,9 @@ features = [
     "handleapi",
     "synchapi",
 ]
+
+[profile.release]
+opt-level = 'z'
+lto = true
+codegen-units = 1
+panic = 'abort'
